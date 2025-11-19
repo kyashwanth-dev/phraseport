@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Host — vibrant hoster</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/">
+        <div class="logo">H</div>
+        <div>
+          <h1 class="title">Hoster</h1>
+          <div class="muted">Share text & files with a keyphrase + passcode</div>
+        </div>
+      </a>
+      <nav class="nav">
+        <a href="/index.html">Upload</a>
+        <a href="/view">Viewer</a>
+      </nav>
+    </header>
+
+    <main class="container">
+      <div class="grid">
+        <section class="card hero">
+          <h2 class="title">Quickly host content</h2>
+          <p class="lead">Paste a note or upload a file. A short keyphrase and a 4-digit passcode will let anyone access it.</p>
+
+          <form id="hostForm" enctype="multipart/form-data" style="margin-top:18px">
+            <label>Title
+              <input name="title" placeholder="A short title (optional)" />
+            </label>
+
+            <label>Text (optional)
+              <textarea name="text" placeholder="Write or paste text here"></textarea>
+            </label>
+
+            <label>File (optional)
+              <input type="file" name="file" />
+            </label>
+
+            <label>Keyphrase (optional)
+              <input name="keyphrase" placeholder="Leave blank to generate" />
+            </label>
+
+            <div style="margin-top:12px;display:flex;gap:10px">
+              <button type="submit">Host content</button>
+              <button type="button" id="openViewerBtn" class="secondary">Open viewer</button>
+            </div>
+          </form>
+
+        </section>
+
+        <aside>
+          <div id="result" class="card">
+      <div class="toast-wrap" id="toasts" aria-live="polite"></div>
+            <div class="empty">No hosted items yet — use the form to host text or files.</div>
+          </div>
+        </aside>
+        
+      </div>
+    </main>
+
+    <script src="/app-index.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Viewer — Host</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/">
+        <div class="logo">H</div>
+        <div>
+          <h1 class="title">Hoster</h1>
+          <div class="muted">Access items with a keyphrase + passcode</div>
+        </div>
+      </a>
+      <nav class="nav">
+        <a href="/index.html">Upload</a>
+        <a href="/view">Viewer</a>
+      </nav>
+    </header>
+
+    <main class="container">
+      <div class="card">
+        <h2 style="margin-top:0;color:white">Access hosted items</h2>
+        <p class="muted">Enter the keyphrase and 4-digit passcode someone shared with you.</p>
+        <form id="accessForm" style="margin-top:12px">
+          <label>Keyphrase: <input id="keyphrase" name="keyphrase" required /></label>
+          <label>Passcode: <input id="passcode" name="passcode" required maxlength="4" title="Enter a 4-digit passcode (0000-9999)" inputmode="numeric" /></label>
+          <div style="margin-top:10px"><button type="submit">List items</button></div>
+        </form>
+      </div>
+
+      <div id="items" class="card" style="margin-top:16px"></div>
+    </main>
+
+    <div class="toast-wrap" id="toasts" aria-live="polite"></div>
+    </main>
+
+    <script src="/app-view.js" defer></script>
+  </body>
+</html>

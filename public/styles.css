@@ -1,0 +1,56 @@
+
+:root{
+	--bg1: #0f172a; /* navy */
+	--bg2: #0b1020; /* dark */
+	--card: rgba(255,255,255,0.06);
+	--glass: rgba(255,255,255,0.04);
+	--muted: rgba(255,255,255,0.7);
+	--accent: #7c5cff; /* vibrant purple */
+	--accent-2: #00d4ff; /* cyan */
+	--glass-border: rgba(255,255,255,0.06);
+	--success: #22c55e;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{font-family:Inter,Segoe UI,Roboto,system-ui,-apple-system,Segoe UI,Helvetica,Arial;padding:0;margin:0;background:linear-gradient(180deg,var(--bg1),var(--bg2));color:var(--muted);-webkit-font-smoothing:antialiased}
+.site-header{display:flex;align-items:center;justify-content:space-between;padding:20px 32px;background:linear-gradient(90deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));backdrop-filter: blur(6px);border-bottom:1px solid var(--glass-border)}
+.brand{display:flex;align-items:center;gap:12px;color:white;text-decoration:none}
+.logo{width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:flex;align-items:center;justify-content:center;color:white;font-weight:700;box-shadow:0 6px 20px rgba(124,92,255,0.18)}
+.brand h1{font-size:18px;margin:0;color:white}
+.nav a{color:rgba(255,255,255,0.85);text-decoration:none;margin-left:14px}
+.container{max-width:1100px;margin:28px auto;padding:0 20px}
+.grid{display:grid;grid-template-columns:1fr 420px;gap:20px;align-items:start}
+.card{background:var(--card);border:1px solid var(--glass-border);padding:20px;border-radius:12px;color:#e6eef8}
+.hero{padding:28px;border-radius:14px;background:linear-gradient(135deg,rgba(124,92,255,0.14),rgba(0,212,255,0.04));box-shadow:inset 0 1px 0 rgba(255,255,255,0.02)}
+h1.title{margin:0;color:white;font-size:24px}
+p.lead{color:rgba(255,255,255,0.85);margin-top:8px}
+form label{display:block;margin:12px 0;color:var(--muted);font-size:14px}
+input[type=text],input[type=file],textarea,input[type=password]{width:100%;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.04);background:rgba(255,255,255,0.02);color:#fff}
+textarea{min-height:120px}
+button{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:white;border:none;padding:10px 14px;border-radius:10px;font-weight:600;cursor:pointer;box-shadow:0 8px 30px rgba(124,92,255,0.12)}
+button.secondary{background:transparent;border:1px solid rgba(255,255,255,0.04);color:var(--muted)}
+.muted{color:rgba(255,255,255,0.65)}
+.result pre{background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;overflow:auto;color:#e6eef8}
+.item{padding:12px;border-bottom:1px solid rgba(255,255,255,0.02)}
+.meta{color:rgba(255,255,255,0.6);font-size:13px;margin-top:6px}
+.thumb{max-width:240px;max-height:160px;border-radius:8px;display:block;margin-top:8px}
+.share-link{display:flex;align-items:center;gap:8px;margin-top:10px}
+.copy-btn{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.04);border-radius:8px;padding:6px 10px;color:#fff;cursor:pointer}
+.preview{margin-top:10px}
+.empty{opacity:0.8;color:rgba(255,255,255,0.6)}
+
+/* Micro-interactions */
+button{transition:transform .14s ease,box-shadow .14s ease}
+button:hover{transform:translateY(-3px);box-shadow:0 14px 40px rgba(124,92,255,0.14)}
+.copy-btn{transition:background .12s ease,transform .12s ease}
+.copy-btn:hover{transform:translateY(-2px);background:rgba(255,255,255,0.08)}
+
+/* Toast */
+.toast-wrap{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:10px;z-index:9999}
+.toast{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:white;padding:10px 14px;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,0.4);transform-origin:right bottom;animation:toast-in .25s ease}
+@keyframes toast-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+.toast.success{background:linear-gradient(90deg,#16a34a,#22c55e)}
+.toast.info{background:linear-gradient(90deg,var(--accent),var(--accent-2))}
+
+@media (max-width:980px){.grid{grid-template-columns:1fr}.container{padding:0 16px}}
+
