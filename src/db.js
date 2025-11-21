@@ -16,8 +16,13 @@ if (databaseUrl) {
 }
 
 // SSL/CA support
+// Accept CA bundle either as file path or as full PEM content in env `PG_SSL_CERT` (recommended for serverless hosts)
 const pgSslCaPath = process.env.PG_SSL_CA_PATH || process.env.DB_SSL_CA_PATH;
-if (pgSslCaPath) {
+const pgSslCertEnv = process.env.PG_SSL_CERT || process.env.DB_SSL_CERT;
+if (pgSslCertEnv) {
+  // PG_SSL_CERT contains the full PEM text (-----BEGIN CERTIFICATE-----...)
+  clientConfig.ssl = { rejectUnauthorized: true, ca: pgSslCertEnv };
+} else if (pgSslCaPath) {
   try {
     const ca = require('fs').readFileSync(require('path').resolve(pgSslCaPath));
     clientConfig.ssl = { rejectUnauthorized: true, ca };

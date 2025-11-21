@@ -28,27 +28,37 @@ const AWS_REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || '
 const s3 = new S3Client({ region: AWS_REGION });
 
 // Postgres (RDS) configuration — use DATABASE_URL if provided
-// By default verify server certificates. To allow self-signed certs (not recommended for production),
-// set one of: PGSSLMODE=no-verify OR DB_SSL_ALLOW_SELF_SIGNED=1 OR DB_SSL_REJECT_UNAUTHORIZED=0
+// Support providing the DB CA bundle as a PEM string in `PG_SSL_CERT` (useful for serverless/hosted envs)
 const poolConfig = {};
 if (process.env.DATABASE_URL) poolConfig.connectionString = process.env.DATABASE_URL;
-// In development default to allowing self-signed certs to avoid frequent local failures.
-const allowSelfSignedEnv = process.env.PGSSLMODE === 'no-verify' || process.env.DB_SSL_ALLOW_SELF_SIGNED === '1' || process.env.DB_SSL_REJECT_UNAUTHORIZED === '0';
-const devDefaultAllow = process.env.NODE_ENV !== 'production';
-const allowSelfSigned = allowSelfSignedEnv || devDefaultAllow;
-if (allowSelfSigned) {
-  console.warn('WARNING: Postgres SSL certificate verification is disabled (rejectUnauthorized=false).\n' +
-    'This is insecure and should only be used in development or when you understand the risks.\n' +
-    'To enable verification, set DB_SSL=true and provide a valid CA or set PGSSLMODE=require.');
-  poolConfig.ssl = { rejectUnauthorized: false };
-} else if (process.env.DB_SSL === 'true' || process.env.PGSSLMODE === 'require') {
-  poolConfig.ssl = { rejectUnauthorized: true };
-}
-// If self-signed certs are allowed, disable Node's global TLS rejection as well
-if (allowSelfSigned) {
-  // This is only for local/dev convenience. Do NOT enable in production.
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-  console.warn('WARNING: NODE_TLS_REJECT_UNAUTHORIZED set to 0 for development (TLS cert verification disabled)');
+const pgSslCertEnv = process.env.PG_SSL_CERT || process.env.DB_SSL_CERT;
+const pgSslCaPath = process.env.PG_SSL_CA_PATH || process.env.DB_SSL_CA_PATH;
+// If PG_SSL_CERT (PEM content) is provided, prefer that and enable strict verification
+if (pgSslCertEnv) {
+  poolConfig.ssl = { rejectUnauthorized: true, ca: pgSslCertEnv };
+} else if (pgSslCaPath) {
+  try {
+    const ca = fs.readFileSync(path.resolve(pgSslCaPath));
+    poolConfig.ssl = { rejectUnauthorized: true, ca };
+  } catch (err) {
+    console.error('Failed to read PG SSL CA file at', pgSslCaPath, err.message || err);
+  }
+} else {
+  // Backwards compatible behavior: allow disabling verification in non-production or via env flags
+  const allowSelfSignedEnv = process.env.PGSSLMODE === 'no-verify' || process.env.DB_SSL_ALLOW_SELF_SIGNED === '1' || process.env.DB_SSL_REJECT_UNAUTHORIZED === '0';
+  const devDefaultAllow = process.env.NODE_ENV !== 'production';
+  const allowSelfSigned = allowSelfSignedEnv || devDefaultAllow;
+  if (allowSelfSigned) {
+    console.warn('WARNING: Postgres SSL certificate verification is disabled (rejectUnauthorized=false).\n' +
+      'This is insecure and should only be used in development or when you understand the risks.\n' +
+      'To enable verification, set DB_SSL=true and provide a valid CA or set PGSSLMODE=require.');
+    poolConfig.ssl = { rejectUnauthorized: false };
+    // This is only for local/dev convenience. Do NOT enable in production.
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    console.warn('WARNING: NODE_TLS_REJECT_UNAUTHORIZED set to 0 for development (TLS cert verification disabled)');
+  } else if (process.env.DB_SSL === 'true' || process.env.PGSSLMODE === 'require') {
+    poolConfig.ssl = { rejectUnauthorized: true };
+  }
 }
 
 const pool = new Pool(poolConfig);
