@@ -9,6 +9,8 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcrypt');
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { Pool } = require('pg');
 
 require('dotenv').config();
 
@@ -17,9 +19,39 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const ROOT = path.join(__dirname, '..');
 
 // Environment-configurable storage and DB locations
-const STORAGE_DIR = process.env.STORAGE_DIR ? path.resolve(process.env.STORAGE_DIR) : path.join(ROOT, 'storage');
 const DATA_FILE = process.env.DATA_FILE ? path.resolve(process.env.DATA_FILE) : path.join(ROOT, 'db.json');
 const SALT_ROUNDS = process.env.PASSCODE_SALT_ROUNDS ? parseInt(process.env.PASSCODE_SALT_ROUNDS, 10) : 10;
+
+// AWS S3 configuration
+const S3_BUCKET = process.env.S3_BUCKET || process.env.AWS_S3_BUCKET;
+const AWS_REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
+const s3 = new S3Client({ region: AWS_REGION });
+
+// Postgres (RDS) configuration — use DATABASE_URL if provided
+// By default verify server certificates. To allow self-signed certs (not recommended for production),
+// set one of: PGSSLMODE=no-verify OR DB_SSL_ALLOW_SELF_SIGNED=1 OR DB_SSL_REJECT_UNAUTHORIZED=0
+const poolConfig = {};
+if (process.env.DATABASE_URL) poolConfig.connectionString = process.env.DATABASE_URL;
+// In development default to allowing self-signed certs to avoid frequent local failures.
+const allowSelfSignedEnv = process.env.PGSSLMODE === 'no-verify' || process.env.DB_SSL_ALLOW_SELF_SIGNED === '1' || process.env.DB_SSL_REJECT_UNAUTHORIZED === '0';
+const devDefaultAllow = process.env.NODE_ENV !== 'production';
+const allowSelfSigned = allowSelfSignedEnv || devDefaultAllow;
+if (allowSelfSigned) {
+  console.warn('WARNING: Postgres SSL certificate verification is disabled (rejectUnauthorized=false).\n' +
+    'This is insecure and should only be used in development or when you understand the risks.\n' +
+    'To enable verification, set DB_SSL=true and provide a valid CA or set PGSSLMODE=require.');
+  poolConfig.ssl = { rejectUnauthorized: false };
+} else if (process.env.DB_SSL === 'true' || process.env.PGSSLMODE === 'require') {
+  poolConfig.ssl = { rejectUnauthorized: true };
+}
+// If self-signed certs are allowed, disable Node's global TLS rejection as well
+if (allowSelfSigned) {
+  // This is only for local/dev convenience. Do NOT enable in production.
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  console.warn('WARNING: NODE_TLS_REJECT_UNAUTHORIZED set to 0 for development (TLS cert verification disabled)');
+}
+
+const pool = new Pool(poolConfig);
 
 // Trust proxy (if running behind a reverse proxy/container)
 if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
@@ -34,31 +66,93 @@ app.use(express.urlencoded({ extended: true }));
 // Static assets with caching
 app.use(express.static(path.join(ROOT, 'public'), { maxAge: '1d' }));
 
-// Ensure storage and DB exist
-if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
-if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify({ items: [] }, null, 2));
+// Multer in-memory storage (we upload files to S3 instead of local disk)
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: process.env.MAX_FILE_SIZE ? parseInt(process.env.MAX_FILE_SIZE, 10) : 10 * 1024 * 1024 } });
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, STORAGE_DIR),
-  filename: (req, file, cb) => {
-    const id = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    const safe = file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-    cb(null, `${id}-${safe}`);
-  }
-});
-const upload = multer({ storage });
+// Database helpers (Postgres)
+async function initDb() {
+  // create table if not exists
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS items (
+      id TEXT PRIMARY KEY,
+      title TEXT,
+      type TEXT,
+      filename TEXT,
+      mimetype TEXT,
+      text TEXT,
+      keyphrase TEXT,
+      passcodehash TEXT,
+      createdat TIMESTAMP WITHOUT TIME ZONE
+    )
+  `);
 
-function readDB() {
+  // Optional import from JSON file if table empty and DATA_FILE present
   try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  } catch (e) {
-    return { items: [] };
+    const r = await pool.query('SELECT count(*)::int as c FROM items');
+    const count = r.rows[0].c;
+    if (count === 0 && fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed.items)) {
+        for (const it of parsed.items) {
+          // skip file items since we don't have their file data in S3
+          if (it.type === 'file' && it.filename) continue;
+          const passHash = it.passcodeHash || (it.passcode ? await bcrypt.hash(String(it.passcode), SALT_ROUNDS) : null);
+          await pool.query(
+            `INSERT INTO items(id,title,type,filename,mimetype,text,keyphrase,passcodehash,createdat)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             ON CONFLICT (id) DO NOTHING`,
+            [it.id, it.title, it.type, null, it.mimeType || null, it.text || null, it.keyphrase || null, passHash, it.createdAt ? new Date(it.createdAt) : new Date()]
+          );
+        }
+        console.log('Imported text items from', DATA_FILE);
+      }
+    }
+  } catch (err) {
+    console.warn('DB init/import warning:', err.message || err);
   }
 }
 
-function writeDB(db) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
+function rowToItem(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    type: row.type,
+    filename: row.filename,
+    mimeType: row.mimetype,
+    text: row.text,
+    keyphrase: row.keyphrase,
+    passcodeHash: row.passcodehash,
+    createdAt: row.createdat ? new Date(row.createdat).toISOString() : null
+  };
 }
+
+async function insertItemToDb(item) {
+  const sql = `INSERT INTO items(id,title,type,filename,mimetype,text,keyphrase,passcodehash,createdat)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`;
+  const params = [item.id, item.title, item.type, item.filename || null, item.mimeType || null, item.text || null, item.keyphrase, item.passcodeHash, new Date(item.createdAt)];
+  try {
+    await pool.query(sql, params);
+  } catch (err) {
+    console.error('insertItemToDb error:', err.stack || err);
+    console.error('SQL:', sql);
+    try { console.error('Params:', JSON.stringify(params)); } catch (_) { console.error('Params: [unserializable]'); }
+    throw err;
+  }
+}
+
+async function findItemsByKeyphrase(keyphrase) {
+  const r = await pool.query('SELECT * FROM items WHERE keyphrase = $1 ORDER BY createdat DESC', [keyphrase]);
+  return r.rows.map(rowToItem);
+}
+
+async function getItemById(id) {
+  const r = await pool.query('SELECT * FROM items WHERE id = $1', [id]);
+  if (r.rows.length === 0) return null;
+  return rowToItem(r.rows[0]);
+}
+
+// (Old JSON file helpers removed — we use Postgres RDS now)
 
 function generateKeyphrase() {
   const words = ['apple','river','sun','moon','blue','green','cloud','stone','forest','star','sky','leaf','fox','lake','wind'];
@@ -66,24 +160,7 @@ function generateKeyphrase() {
   return `${pick()}-${pick()}-${pick()}`;
 }
 
-// Migration: hash any legacy plain-text passcodes into passcodeHash and remove plain passcode
-async function migratePlainPasscodes() {
-  const db = readDB();
-  let changed = false;
-  for (const it of db.items) {
-    if (it.passcode && !it.passcodeHash) {
-      try {
-        const hash = await bcrypt.hash(String(it.passcode), SALT_ROUNDS);
-        it.passcodeHash = hash;
-        delete it.passcode;
-        changed = true;
-      } catch (err) {
-        console.error('failed to hash passcode for item', it.id, err);
-      }
-    }
-  }
-  if (changed) writeDB(db);
-}
+// No-op: passcode migration handled during DB import/initialization
 
 // verify passcode with backward compatibility
 async function verifyPasscode(item, passcodePlain) {
@@ -123,17 +200,16 @@ app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISO
 // Startup migration
 (async () => {
   try {
-    await migratePlainPasscodes();
-    console.log('migration: passcodes hashed where needed');
+    await initDb();
+    console.log('DB initialized');
   } catch (err) {
-    console.error('migration error', err);
+    console.error('DB init error', err);
   }
 })();
 
 // Create a new hosted item (text or file)
 app.post('/api/host', hostLimiter, upload.single('file'), async (req, res) => {
   try {
-    const db = readDB();
     const id = uuidv4();
     const providedKey = req.body.keyphrase && req.body.keyphrase.trim();
     const keyphrase = providedKey || generateKeyphrase();
@@ -142,35 +218,67 @@ app.post('/api/host', hostLimiter, upload.single('file'), async (req, res) => {
 
     const passcodeHash = await bcrypt.hash(passcode, SALT_ROUNDS);
 
+    let filename = undefined;
+    let mimeType = undefined;
+
+    if (req.file) {
+      if (!S3_BUCKET) return res.status(500).json({ error: 'S3_BUCKET not configured' });
+      const safe = req.file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+      const key = `${id}-${safe}`;
+      try {
+        await s3.send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, Body: req.file.buffer, ContentType: req.file.mimetype }));
+        filename = key;
+        mimeType = req.file.mimetype;
+      } catch (err) {
+        console.error('S3 upload failed', err.stack || err);
+        const body = { error: 'failed to upload file to S3' };
+        if (process.env.NODE_ENV !== 'production') {
+          body.detail = err.message || String(err);
+          body.stack = err.stack || null;
+        }
+        return res.status(500).json(body);
+      }
+    }
+
     const item = {
       id,
       title: req.body.title || (req.file ? req.file.originalname : 'untitled'),
       type: req.file ? 'file' : 'text',
-      filename: req.file ? req.file.filename : undefined,
-      mimeType: req.file ? req.file.mimetype : undefined,
+      filename,
+      mimeType,
       text: req.body.text || undefined,
       keyphrase,
       passcodeHash,
       createdAt: new Date().toISOString()
     };
 
-    db.items.push(item);
-    writeDB(db);
+    try {
+      await insertItemToDb(item);
+    } catch (dbErr) {
+      console.error('DB insert failed', dbErr.stack || dbErr);
+      const body = { error: 'failed to write item to DB' };
+      if (process.env.NODE_ENV !== 'production') {
+        body.detail = dbErr.message || String(dbErr);
+        body.stack = dbErr.stack || null;
+      }
+      return res.status(500).json(body);
+    }
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const shareUrl = `${baseUrl}/view?keyphrase=${encodeURIComponent(keyphrase)}&passcode=${encodeURIComponent(passcode)}`;
     // return plain passcode only in response (one-time). Not stored in DB as plaintext.
     res.json({ success: true, id: item.id, keyphrase: item.keyphrase, passcode, shareUrl });
   } catch (err) {
-    console.error(err);
+    console.error('Unhandled error in /api/host', err.stack || err);
+    if (process.env.NODE_ENV !== 'production') {
+      return res.status(500).json({ error: 'failed to host item', detail: err.message, stack: err.stack });
+    }
     res.status(500).json({ error: 'failed to host item' });
   }
 });
-
 // Helper: authorize items by keyphrase+passcode (async)
 async function getAuthorizedItems(keyphrase, passcode) {
-  const db = readDB();
-  const candidates = db.items.filter(it => it.keyphrase === keyphrase);
+  const candidates = await findItemsByKeyphrase(keyphrase);
   const out = [];
   for (const it of candidates) {
     if (await verifyPasscode(it, passcode)) out.push(it);
@@ -183,11 +291,11 @@ app.get('/api/items', async (req, res) => {
   const { keyphrase, passcode } = req.query;
   if (!keyphrase || !passcode) return res.status(400).json({ error: 'keyphrase and passcode required' });
   const matches = await getAuthorizedItems(keyphrase, passcode);
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
   const out = matches.map(it => {
     const item = { id: it.id, title: it.title, type: it.type, createdAt: it.createdAt };
     if (it.type === 'file' && it.filename) {
       const ext = path.extname(it.filename).toLowerCase();
-      const baseUrl = `${req.protocol}://${req.get('host')}`;
       if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(ext)) {
         item.previewType = 'image';
         item.previewUrl = `${baseUrl}/api/file/${it.id}?keyphrase=${encodeURIComponent(keyphrase)}&passcode=${encodeURIComponent(passcode)}`;
@@ -209,9 +317,8 @@ app.get('/api/item/:id', async (req, res) => {
   const { keyphrase, passcode } = req.query;
   const id = req.params.id;
   if (!keyphrase || !passcode) return res.status(400).json({ error: 'keyphrase and passcode required' });
-  const db = readDB();
-  const it = db.items.find(x => x.id === id && x.keyphrase === keyphrase);
-  if (!it) return res.status(404).json({ error: 'not found or invalid credentials' });
+  const it = await getItemById(id);
+  if (!it || it.keyphrase !== keyphrase) return res.status(404).json({ error: 'not found or invalid credentials' });
   if (!(await verifyPasscode(it, passcode))) return res.status(404).json({ error: 'not found or invalid credentials' });
   const baseUrl = `${req.protocol}://${req.get('host')}`;
   const downloadUrl = it.type === 'file' ? `${baseUrl}/api/file/${it.id}?keyphrase=${encodeURIComponent(keyphrase)}&passcode=${encodeURIComponent(passcode)}` : undefined;
@@ -223,19 +330,58 @@ app.get('/api/file/:id', async (req, res) => {
   const { keyphrase, passcode } = req.query;
   const id = req.params.id;
   if (!keyphrase || !passcode) return res.status(400).send('keyphrase and passcode required');
-  const db = readDB();
-  const it = db.items.find(x => x.id === id && x.keyphrase === keyphrase);
-  if (!it) return res.status(404).send('not found or invalid credentials');
+  const it = await getItemById(id);
+  if (!it || it.keyphrase !== keyphrase) return res.status(404).send('not found or invalid credentials');
   if (!(await verifyPasscode(it, passcode))) return res.status(404).send('not found or invalid credentials');
   if (it.type !== 'file' || !it.filename) return res.status(400).send('item is not a file');
-  const p = path.join(STORAGE_DIR, it.filename);
-  if (!fs.existsSync(p)) return res.status(404).send('file not found');
-  res.sendFile(p);
+  if (!S3_BUCKET) return res.status(500).send('S3_BUCKET not configured');
+  try {
+    const data = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: it.filename }));
+    if (it.mimeType) res.setHeader('Content-Type', it.mimeType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    // stream the S3 body to the response
+    const body = data.Body;
+    if (body && typeof body.pipe === 'function') {
+      body.pipe(res);
+    } else {
+      // fallback: collect buffer
+      const chunks = [];
+      for await (const chunk of body) chunks.push(chunk);
+      res.end(Buffer.concat(chunks));
+    }
+  } catch (err) {
+    console.error('S3 get error', err);
+    res.status(404).send('file not found');
+  }
 });
 
 // Convenience route: serve the viewer at /view
 app.get('/view', (req, res) => {
   res.sendFile(path.join(ROOT, 'public', 'view.html'));
+});
+
+// Debug endpoints to check DB and insert permissions
+app.get('/debug/db', async (req, res) => {
+  try {
+    const r = await pool.query('SELECT NOW() as now');
+    res.json({ ok: true, now: r.rows[0].now });
+  } catch (err) {
+    console.error('debug/db error', err.stack || err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/debug/insert-test', express.json(), async (req, res) => {
+  const testId = `debug-${Date.now()}`;
+  try {
+    await pool.query('INSERT INTO items(id,title,type,createdat) VALUES($1,$2,$3,$4)', [testId, 'debug', 'text', new Date()]);
+    // cleanup
+    await pool.query('DELETE FROM items WHERE id = $1', [testId]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('debug/insert-test error', err.stack || err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // Redirect legacy /public/view.html requests to the correct location
